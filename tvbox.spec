@@ -2,16 +2,19 @@
 """TVBox Desktop — PyInstaller 打包配置"""
 
 import sys
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
 block_cipher = None
+
+# 收集 PyQt6 全部文件（DLL、插件、翻译等）
+pyqt6_datas, pyqt6_binaries, pyqt6_hiddenimports = collect_all('PyQt6')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
+    binaries=pyqt6_binaries,
+    datas=pyqt6_datas,
+    hiddenimports=pyqt6_hiddenimports + [
         'PyQt6',
         'PyQt6.QtWidgets',
         'PyQt6.QtCore',
