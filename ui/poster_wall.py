@@ -349,11 +349,17 @@ class PosterWallPage(QWidget):
                 continue
             try:
                 result = self.source_mgr.fetch_source(source)
-                for cat in result.get('categories', []):
+                # fetch_source 返回 SourceResult 对象
+                cats = result.categories if hasattr(result, 'categories') else result.get('categories', [])
+                for cat in cats:
                     categories.add(cat.name)
                     for item in cat.items:
                         item.group = cat.name  # 保留分类信息
                         all_items.append(item)
+                # 如果是多仓，也收集 urls 信息
+                if hasattr(result, 'source_type') and result.source_type == 'multi':
+                    # 多仓源本身不直接有视频，跳过
+                    pass
             except Exception as e:
                 print(f"[PosterWall] 加载源失败 [{source.name}]: {e}")
 
@@ -361,8 +367,12 @@ class PosterWallPage(QWidget):
 
     def _on_sources_loaded(self, result):
         """源加载完成"""
-        self._all_items = result.get('items', [])
-        categories = result.get('categories', [])
+        if isinstance(result, dict):
+            self._all_items = result.get('items', [])
+            categories = result.get('categories', [])
+        else:
+            self._all_items = getattr(result, 'items', [])
+            categories = getattr(result, 'categories', [])
 
         if not self._all_items:
             self.banner_label.setText(

@@ -119,6 +119,8 @@ class SourceManager:
         # 缓存过期时间（秒）
         self._cache_ttl = 600  # 10 分钟
         self._cache_time: Dict[str, float] = {}
+        # 当前源的 spider URL（type=3 站点需要）
+        self._current_spider_url: str = ""
 
     # ========================================================
     #  缓存管理
@@ -337,6 +339,9 @@ class SourceManager:
         result.flags = data.get('flags', [])
         result.ijk = data.get('ijk', {})
         result.ads = data.get('ads', [])
+
+        # 保存当前 spider URL 供后续 type=3 站点使用
+        self._current_spider_url = result.spider
 
         # 解析直播源
         for live in data.get('lives', []):
@@ -570,6 +575,9 @@ class SourceManager:
 
     def _fetch_categories_api(self, api_url: str) -> list:
         """通过标准 API 拉取分类列表"""
+        # 跳过 csp_ 开头的类名（这些是 spider，不是 URL）
+        if api_url.startswith('csp_'):
+            return []
         categories = []
         try:
             url = api_url.rstrip('/') + '?ac=list'
@@ -590,26 +598,19 @@ class SourceManager:
     def _fetch_categories_spider(self, site: dict) -> list:
         """通过 Spider 引擎获取分类（type=3）"""
         categories = []
-        api_url = site.get('api', '')
-        if not api_url or not self.spider_engine:
+        if not self.spider_engine:
             return categories
 
         try:
-            # 获取 Spider 脚本内容
-            js_content = self.spider_engine.fetch_content(api_url)
-            if not js_content:
-                return categories
-
-            # 执行 Spider 的 category 方法
-            result = self.spider_engine.execute_js(js_content, 'category', [])
-            if result:
-                data = json.loads(result)
-                if isinstance(data, list):
-                    for item in data:
-                        type_id = item.get('type_id', '')
-                        type_name = item.get('type_name', '')
-                        if type_id:
-                            categories.append(Category(name=type_name, type_id=str(type_id), items=[]))
+            result = self.spider_engine.call_site_method(
+                site, self._current_spider_url, 'homeContent', filter=True
+            )
+            if result and isinstance(result, dict):
+                for cls in result.get('class', []):
+                    type_id = cls.get('type_id', '')
+                    type_name = cls.get('type_name', '')
+                    if type_id:
+                        categories.append(Category(name=type_name, type_id=str(type_id), items=[]))
         except Exception as e:
             print(f"[SourceManager] Spider 获取分类失败: {e}")
 
@@ -659,39 +660,39 @@ class SourceManager:
     def _fetch_category_items_spider(self, site: dict, tid: str, pg: int = 1) -> list:
         """通过 Spider 引擎获取分类下的视频列表"""
         items = []
-        api_url = site.get('api', '')
-        if not api_url or not self.spider_engine:
+        if not self.spider_engine:
             return items
 
         try:
-            js_content = self.spider_engine.fetch_content(api_url)
-            if not js_content:
-                return items
-
-            result = self.spider_engine.execute_js(js_content, 'category', [tid, pg])
-            if result:
-                data = json.loads(result)
-                if isinstance(data, dict):
-                    for vod in data.get('list', []):
-                        item = self._vod_to_video_item(vod)
-                        if item.name:
-                            items.append(item)
+            result = self.spider_engine.call_site_method(
+                site, self._current_spider_url, 'category',
+                tid=tid, pg=pg, filter=True
+            )
+            if result and isinstance(result, dict):
+                for vod in result.get('list', []):
+                    item = self._vod_to_video_item(vod)
+                    if item.name:
+                        items.append(item)
         except Exception as e:
             print(f"[SourceManager] Spider 获取分类内容失败: {e}")
 
         return items
 
-    def fetch_detail(self, site: dict, vod_id: str) -> Optional[VideoItem]:
+    def fetch_detail(self, site, vod_id: str) -> Optional[VideoItem]:
         """
         获取视频详情（含多线路播放地址）
         
         Args:
-            site: 站点配置
+            site: 站点配置 dict 或 API URL 字符串（向后兼容）
             vod_id: 视频 ID
             
         Returns:
             VideoItem 或 None
         """
+        # 向后兼容：如果传入的是字符串 URL，构造 site dict
+        if isinstance(site, str):
+            site = {'type': 0, 'api': site, 'key': 'default', 'name': '默认'}
+
         site_type = site.get('type', -1)
         api_url = self._get_site_api_url(site)
 
@@ -702,10 +703,14 @@ class SourceManager:
             return self._fetch_detail_api(api_url, vod_id)
         elif site_type == 3:
             return self._fetch_detail_spider(site, vod_id)
-        return None
+        # 默认尝试 API 方式
+        return self._fetch_detail_api(api_url, vod_id)
 
     def _fetch_detail_api(self, api_url: str, vod_id: str) -> Optional[VideoItem]:
         """通过标准 API 获取视频详情"""
+        # 跳过 csp_ 开头的类名（这些是 spider，不是 URL）
+        if api_url.startswith('csp_'):
+            return None
         try:
             url = api_url.rstrip('/') + f'?ac=detail&ids={vod_id}'
             resp = self.session.get(url, timeout=15)
@@ -725,38 +730,37 @@ class SourceManager:
 
     def _fetch_detail_spider(self, site: dict, vod_id: str) -> Optional[VideoItem]:
         """通过 Spider 引擎获取视频详情"""
-        api_url = site.get('api', '')
-        if not api_url or not self.spider_engine:
+        if not self.spider_engine:
             return None
 
         try:
-            js_content = self.spider_engine.fetch_content(api_url)
-            if not js_content:
-                return None
-
-            result = self.spider_engine.execute_js(js_content, 'detail', [vod_id])
-            if result:
-                data = json.loads(result)
-                if isinstance(data, dict):
-                    vod_list = data.get('list', [])
-                    if vod_list:
-                        return self._vod_to_video_item(vod_list[0], detail=True)
+            result = self.spider_engine.call_site_method(
+                site, self._current_spider_url, 'detail', ids=vod_id
+            )
+            if result and isinstance(result, dict):
+                vod_list = result.get('list', [])
+                if vod_list:
+                    return self._vod_to_video_item(vod_list[0], detail=True)
         except Exception as e:
             print(f"[SourceManager] Spider 获取详情失败: {e}")
 
         return None
 
-    def search(self, site: dict, keyword: str) -> list:
+    def search(self, site, keyword: str) -> list:
         """
         搜索影视
         
         Args:
-            site: 站点配置
+            site: 站点配置 dict 或 API URL 字符串（向后兼容）
             keyword: 搜索关键词
             
         Returns:
             VideoItem 列表
         """
+        # 向后兼容：如果传入的是字符串 URL，构造 site dict
+        if isinstance(site, str):
+            site = {'type': 0, 'api': site, 'key': 'default', 'name': '默认'}
+
         site_type = site.get('type', -1)
         api_url = self._get_site_api_url(site)
 
@@ -767,7 +771,8 @@ class SourceManager:
             return self._search_api(api_url, keyword)
         elif site_type == 3:
             return self._search_spider(site, keyword)
-        return []
+        # 默认尝试 API 方式
+        return self._search_api(api_url, keyword)
 
     def _search_api(self, api_url: str, keyword: str) -> list:
         """通过标准 API 搜索"""
@@ -789,23 +794,18 @@ class SourceManager:
     def _search_spider(self, site: dict, keyword: str) -> list:
         """通过 Spider 引擎搜索"""
         items = []
-        api_url = site.get('api', '')
-        if not api_url or not self.spider_engine:
+        if not self.spider_engine:
             return items
 
         try:
-            js_content = self.spider_engine.fetch_content(api_url)
-            if not js_content:
-                return items
-
-            result = self.spider_engine.execute_js(js_content, 'search', [keyword])
-            if result:
-                data = json.loads(result)
-                if isinstance(data, list):
-                    for vod in data:
-                        item = self._vod_to_video_item(vod)
-                        if item.name:
-                            items.append(item)
+            result = self.spider_engine.call_site_method(
+                site, self._current_spider_url, 'search', wd=keyword
+            )
+            if result and isinstance(result, dict):
+                for vod in result.get('list', []):
+                    item = self._vod_to_video_item(vod)
+                    if item.name:
+                        items.append(item)
         except Exception as e:
             print(f"[SourceManager] Spider 搜索失败: {e}")
 
@@ -842,21 +842,15 @@ class SourceManager:
 
     def _resolve_play_url_spider(self, site: dict, flag: str, url: str) -> str:
         """通过 Spider 引擎解析播放地址"""
-        api_url = site.get('api', '')
-        if not api_url or not self.spider_engine:
+        if not self.spider_engine:
             return url
 
         try:
-            js_content = self.spider_engine.fetch_content(api_url)
-            if not js_content:
-                return url
-
-            result = self.spider_engine.execute_js(js_content, 'play', [flag, url])
-            if result:
-                data = json.loads(result)
-                if isinstance(data, dict):
-                    return data.get('url', url)
-                return result
+            result = self.spider_engine.call_site_method(
+                site, self._current_spider_url, 'play', flag=flag, id=url
+            )
+            if result and isinstance(result, dict):
+                return result.get('url', url)
         except Exception as e:
             print(f"[SourceManager] Spider 解析播放地址失败: {e}")
 

@@ -1913,14 +1913,15 @@ class MainWindow(QMainWindow):
             )
 
         # 从内置源配置导入（多仓源 + 单源 + 直播源）
-        builtin = get_all_builtin_sources()
+        from core.builtin_sources import get_builtin_warehouse_sources, get_builtin_single_source_list, get_builtin_live_source_list
         existing_urls = {s.url for s in self.state.sources}
         added = 0
-        for src in builtin:
-            if src.url not in existing_urls:
-                self.state.sources.append(src)
-                existing_urls.add(src.url)
-                added += 1
+        for src_list in [get_builtin_warehouse_sources(), get_builtin_single_source_list(), get_builtin_live_source_list()]:
+            for src in src_list:
+                if src.url not in existing_urls:
+                    self.state.sources.append(src)
+                    existing_urls.add(src.url)
+                    added += 1
 
         self.state.save()
         if added:
@@ -1928,7 +1929,7 @@ class MainWindow(QMainWindow):
                 f'🎉 已自动添加 {added} 个内置源（多仓源 + 直播源），开始浏览吧！', 8000
             )
         else:
-            self.statusBar().showMessage('🎉 已自动添加预设仓库和源，开始浏览吧！', 8000)
+            self.statusBar().showMessage('🎉 内置源已存在，开始浏览吧！', 8000)
 
     def _refresh_source_dropdown(self):
         """刷新源下拉框 — 区分多仓源和单源
@@ -1996,30 +1997,33 @@ class MainWindow(QMainWindow):
 
         self.source_combo.blockSignals(False)
 
-    def _on_warehouse_loaded(self, warehouse_src: SourceInfo, result: dict):
+    def _on_warehouse_loaded(self, warehouse_src: SourceInfo, result):
         """多仓加载完成，解析子源列表"""
         self.source_combo.blockSignals(True)
         self.source_combo.clear()
 
-        # 尝试从多仓 JSON 中提取子源
-        import json
-        try:
-            resp = self.source_manager.session.get(warehouse_src.url, timeout=15)
-            data = json.loads(resp.text)
-            store_houses = data.get('storeHouse', [])
-            if store_houses:
-                for sh in store_houses:
-                    name = sh.get('sourceName', '未知')
-                    url = sh.get('sourceUrl', '')
-                    if url:
-                        sub_src = SourceInfo(name=name, url=url, repo_name=warehouse_src.name)
-                        self.source_combo.addItem(f'📡 {name}', sub_src)
-                self.source_combo.blockSignals(False)
-                self.source_status_label.setText('✅')
-                self.source_status_label.setToolTip(f'多仓 [{warehouse_src.name}] 已加载 {len(store_houses)} 个子源')
-                return
-        except Exception:
-            pass
+        # result 是 SourceResult 对象
+        urls = []
+        if hasattr(result, 'urls'):
+            urls = result.urls
+        elif isinstance(result, dict):
+            urls = result.get('urls', [])
+
+        if urls:
+            for item in urls:
+                if isinstance(item, dict):
+                    name = item.get('name', '未命名')
+                    url = item.get('url', '')
+                else:
+                    name = '未命名'
+                    url = str(item)
+                if url:
+                    sub_src = SourceInfo(name=name, url=url, repo_name=warehouse_src.name)
+                    self.source_combo.addItem(f'📡 {name}', sub_src)
+            self.source_combo.blockSignals(False)
+            self.source_status_label.setText('✅')
+            self.source_status_label.setToolTip(f'多仓 [{warehouse_src.name}] 已加载 {len(urls)} 个子源')
+            return
 
         # 如果多仓解析失败，回退到单源模式
         self.source_combo.addItem('⚠️ 多仓解析失败，回退单源', None)
