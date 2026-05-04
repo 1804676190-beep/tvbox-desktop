@@ -95,6 +95,16 @@ class CoverLoader(QThread):
                     pixmap.loadFromData(QByteArray(resp.content))
                     if not pixmap.isNull():
                         self.loaded.emit(url, pixmap)
+                        # 直接更新 label (线程安全)
+                        try:
+                            scaled = pixmap.scaled(
+                                label.size(),
+                                1,  # Qt.AspectRatioMode.KeepAspectRatio
+                                1   # Qt.TransformationMode.SmoothTransformation
+                            )
+                            label.setPixmap(scaled)
+                        except Exception:
+                            pass
             except Exception:
                 pass
         self._running = False
@@ -1522,7 +1532,12 @@ class MainWindow(QMainWindow):
             scraper=self.scraper,
             cover_loader=self.cover_loader,
         )
-        self.poster_wall.video_clicked.connect(self._load_detail)
+        self.poster_wall.video_clicked.connect(
+            lambda video: self._load_detail(
+                self.source_combo.currentData().url if self.source_combo.currentData() else '',
+                video.url
+            )
+        )
         self.poster_wall.status_message.connect(self.statusBar().showMessage)
         # 启动时自动刷新
         QTimer.singleShot(800, self.poster_wall.refresh)
@@ -1690,70 +1705,31 @@ class MainWindow(QMainWindow):
         self.state.save()
 
     def _load_current_source(self):
-        """加载当前选中的源"""
-        src = self.source_combo.currentData()
-        if not src:
-            self.home_status.setText('⚠️ 没有可用的源，请先添加订阅源')
-            return
-
-        self.home_status.setText(f'🔄 正在加载 {src.name}...')
-        self._worker = WorkerThread(self.source_manager.fetch_source, src)
-        self._worker.finished.connect(self._on_source_loaded)
-        self._worker.error.connect(lambda e: self.home_status.setText(f'❌ 加载失败: {e}'))
-        self._worker.start()
+        """加载当前选中的源 — 委托给海报墙"""
+        if hasattr(self, 'poster_wall'):
+            self.poster_wall.refresh()
+        else:
+            self.statusBar().showMessage('⚠️ 没有可用的源，请先添加订阅源')
 
     def _on_source_loaded(self, result):
-        """源加载完成"""
+        """源加载完成 (兼容旧调用)"""
         categories = result.get('categories', [])
         live_channels = result.get('live_channels', [])
-
-        # 更新首页
-        self._show_categories(categories)
-
-        # 更新直播
         if live_channels:
             self.live_page.set_channels(live_channels)
-
         self.statusBar().showMessage(f'✅ 加载完成: {len(categories)} 个分类, {len(live_channels)} 个直播频道')
 
     def _show_categories(self, categories: list):
-        """在首页显示分类"""
-        # 清空
-        while self.home_grid.count():
-            item = self.home_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        if not categories:
-            self.home_status.setText('😔 该源没有分类数据')
-            self.home_status.show()
-            self.home_welcome.show()
-            return
-
-        self.home_status.hide()
-        self.home_welcome.hide()
-
-        row = 0
-        for cat in categories:
-            # 分类标题
-            title = QLabel(f'📂 {cat.name}')
-            title.setStyleSheet("color: #aaa; font-size: 14px; font-weight: bold; margin-top: 8px;")
-            self.home_grid.addWidget(title, row, 0, 1, 8)
-            row += 1
-
-            # 视频卡片
-            cols = max(1, self.home_scroll.viewport().width() // 172)
-            for i, video in enumerate(cat.items[:cols * 2]):  # 每分类最多显示2行
-                card = VideoCard(video, self.cover_loader)
-                src = self.source_combo.currentData()
-                api_url = src.url if src else ''
-                card.clicked.connect(partial(self._on_card_clicked, api_url))
-                self.home_grid.addWidget(card, row + i // cols, i % cols)
-
-            row += (len(cat.items[:cols * 2]) + cols - 1) // cols + 1
+        """在首页显示分类 (委托给海报墙)"""
+        if hasattr(self, 'poster_wall'):
+            self.poster_wall.refresh()
 
     def _on_card_clicked(self, api_url: str, video: VideoItem):
         """点击视频卡片"""
+        if not api_url:
+            # 从 source_combo 获取
+            src = self.source_combo.currentData()
+            api_url = src.url if src else ''
         self._load_detail(api_url, video.url)
 
     def _load_detail(self, api_url: str, vod_id: str):
