@@ -823,7 +823,7 @@ class PasteLinkDialog(QDialog):
             # 去重
             existing_urls = {r.url for r in self.state.repositories}
             if repo.url not in existing_urls:
-                from models import Repository as RepoModel
+                from core.models import Repository as RepoModel
                 new_repo = RepoModel(
                     name=repo.name,
                     url=repo.url,
@@ -836,7 +836,7 @@ class PasteLinkDialog(QDialog):
             for src in repo.sources:
                 existing_src_urls = {s.url for s in self.state.sources}
                 if src.url not in existing_src_urls:
-                    from models import SourceInfo
+                    from core.models import SourceInfo
                     new_src = SourceInfo(
                         name=src.name,
                         url=src.url,
@@ -850,7 +850,7 @@ class PasteLinkDialog(QDialog):
         for src in sources:
             existing_src_urls = {s.url for s in self.state.sources}
             if src.url not in existing_src_urls:
-                from models import SourceInfo
+                from core.models import SourceInfo
                 new_src = SourceInfo(
                     name=src.name,
                     url=src.url,

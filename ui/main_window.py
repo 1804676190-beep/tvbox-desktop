@@ -32,6 +32,7 @@ from core.repository import fetch_repository, PRESET_REPOSITORIES
 from core.cloud_drive import AlistClient, WebDAVClient, CloudFile
 from core.media_player import MediaPlayer
 from paste_link_converter import PasteLinkDialog
+from core.updater import check_update, format_size, CURRENT_VERSION
 
 
 # ============================================================
@@ -110,13 +111,15 @@ class VideoCard(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet("""
             VideoCard {
-                background: #1a1a2e;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1e1e3a, stop:1 #14142a);
                 border: 1px solid #2a2a4e;
-                border-radius: 8px;
+                border-radius: 10px;
             }
             VideoCard:hover {
-                border-color: #5a5aaa;
-                background: #22224a;
+                border-color: #6a6acc;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #282850, stop:1 #1a1a3a);
             }
         """)
 
@@ -191,16 +194,21 @@ class DetailPage(QWidget):
 
         # 返回按钮
         back_btn = QPushButton('← 返回')
-        back_btn.setFixedWidth(80)
+        back_btn.setFixedWidth(90)
         back_btn.setStyleSheet("""
             QPushButton {
-                background: #2a2a4e;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2e2e56, stop:1 #242448);
                 border: 1px solid #3a3a6e;
-                border-radius: 4px;
-                padding: 6px 12px;
+                border-radius: 6px;
+                padding: 7px 14px;
+                color: #ccc;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: #3a3a6e;
                 color: #eee;
             }
-            QPushButton:hover { background: #3a3a6e; }
         """)
         back_btn.clicked.connect(self.back_requested.emit)
         layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -1093,140 +1101,167 @@ class MainWindow(QMainWindow):
 
     STYLE = """
     QMainWindow, QWidget {
-        background: #0f0f1a;
+        background: #0d0d1a;
         color: #eee;
+        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     }
     QMenuBar {
-        background: #16162a;
-        border-bottom: 1px solid #333;
-        color: #eee;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #1a1a30, stop:1 #141428);
+        border-bottom: 1px solid #2a2a4a;
+        color: #ddd;
+        padding: 2px;
     }
     QMenuBar::item:selected {
         background: #3a3a6e;
+        border-radius: 4px;
     }
     QMenu {
         background: #1a1a2e;
-        border: 1px solid #333;
-        color: #eee;
+        border: 1px solid #3a3a5e;
+        border-radius: 6px;
+        padding: 4px;
+        color: #ddd;
+    }
+    QMenu::item {
+        padding: 6px 20px;
+        border-radius: 3px;
     }
     QMenu::item:selected {
         background: #3a3a6e;
     }
     QToolBar {
-        background: #16162a;
-        border-bottom: 1px solid #333;
-        spacing: 6px;
-        padding: 4px;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #18182e, stop:1 #12122a);
+        border-bottom: 1px solid #2a2a4a;
+        spacing: 8px;
+        padding: 6px;
     }
     QStatusBar {
-        background: #16162a;
-        border-top: 1px solid #333;
+        background: #12122a;
+        border-top: 1px solid #2a2a4a;
         color: #888;
+        padding: 2px;
     }
     QTabWidget::pane {
-        border: 1px solid #333;
-        background: #0f0f1a;
+        border: 1px solid #2a2a4a;
+        background: #0d0d1a;
+        border-radius: 0 0 6px 6px;
     }
     QTabBar::tab {
-        background: #1a1a2e;
-        border: 1px solid #333;
-        padding: 8px 16px;
-        color: #aaa;
+        background: #161630;
+        border: 1px solid #2a2a4a;
+        padding: 10px 18px;
+        color: #999;
         margin-right: 2px;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
     }
     QTabBar::tab:selected {
-        background: #2a2a4e;
+        background: #22224a;
         color: #eee;
-        border-bottom-color: #2a2a4e;
+        border-bottom-color: #22224a;
     }
     QTabBar::tab:hover {
-        background: #22224a;
+        background: #1e1e3e;
+        color: #ccc;
     }
     QScrollBar:vertical {
-        background: #0f0f1a;
+        background: transparent;
         width: 8px;
         border: none;
     }
     QScrollBar::handle:vertical {
-        background: #333;
+        background: #3a3a5a;
         border-radius: 4px;
         min-height: 30px;
     }
     QScrollBar::handle:vertical:hover {
-        background: #555;
+        background: #5a5a7a;
     }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
         height: 0;
     }
     QScrollBar:horizontal {
-        background: #0f0f1a;
+        background: transparent;
         height: 8px;
         border: none;
     }
     QScrollBar::handle:horizontal {
-        background: #333;
+        background: #3a3a5a;
         border-radius: 4px;
         min-width: 30px;
     }
     QLineEdit {
-        background: #1a1a2e;
+        background: #16162e;
         border: 1px solid #333;
-        border-radius: 4px;
-        padding: 6px 10px;
+        border-radius: 6px;
+        padding: 7px 12px;
         color: #eee;
+        selection-background-color: #4a4a8e;
     }
     QLineEdit:focus {
-        border-color: #5a5aaa;
+        border-color: #6a6acc;
+        background: #1a1a34;
     }
     QComboBox {
-        background: #1a1a2e;
+        background: #16162e;
         border: 1px solid #333;
-        border-radius: 4px;
-        padding: 6px 10px;
+        border-radius: 6px;
+        padding: 7px 12px;
         color: #eee;
     }
-    QComboBox::drop-down { border: none; }
+    QComboBox::drop-down {
+        border: none;
+        width: 20px;
+    }
     QComboBox QAbstractItemView {
         background: #1a1a2e;
-        border: 1px solid #333;
+        border: 1px solid #3a3a5e;
         color: #eee;
         selection-background-color: #3a3a6e;
+        border-radius: 4px;
     }
     QPushButton {
-        background: #2a2a4e;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #30305a, stop:1 #262650);
         border: 1px solid #3a3a6e;
-        border-radius: 4px;
-        padding: 6px 14px;
+        border-radius: 6px;
+        padding: 7px 16px;
         color: #eee;
     }
     QPushButton:hover {
-        background: #3a3a6e;
-        border-color: #5a5aaa;
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 #3e3e70, stop:1 #303060);
+        border-color: #6a6acc;
     }
     QPushButton:pressed {
         background: #4a4a8e;
     }
     QSlider::groove:horizontal {
-        background: #333;
-        height: 4px;
+        background: #2a2a4a;
+        height: 5px;
         border-radius: 2px;
     }
     QSlider::handle:horizontal {
-        background: #5a5aaa;
+        background: qradialgradient(cx:0.5, cy:0.5, radius:0.5,
+            fx:0.5, fy:0.5, stop:0 #8a8aee, stop:1 #5a5aaa);
         width: 14px;
         height: 14px;
         margin: -5px 0;
         border-radius: 7px;
     }
     QSlider::handle:horizontal:hover {
-        background: #7a7acc;
+        background: qradialgradient(cx:0.5, cy:0.5, radius:0.5,
+            fx:0.5, fy:0.5, stop:0 #aaaaff, stop:1 #7a7acc);
     }
     QSlider::sub-page:horizontal {
-        background: #5a5aaa;
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 #4a4a8e, stop:1 #6a6acc);
         border-radius: 2px;
     }
     QSplitter::handle {
-        background: #333;
+        background: #2a2a4a;
         width: 2px;
     }
     """
@@ -1254,6 +1289,9 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
 
         # 初始化源
+        if not self.state.repositories and not self.state.sources:
+            # 首次启动，自动添加预设仓库和源
+            self._auto_add_presets()
         if self.state.sources:
             self._refresh_source_dropdown()
             QTimer.singleShot(500, self._load_current_source)
@@ -1311,6 +1349,13 @@ class MainWindow(QMainWindow):
 
         # 帮助菜单
         help_menu = menubar.addMenu('帮助')
+
+        update_action = QAction('🔄 检查更新', self)
+        update_action.triggered.connect(self._check_update)
+        help_menu.addAction(update_action)
+
+        help_menu.addSeparator()
+
         about_action = QAction('关于', self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -1431,7 +1476,11 @@ class MainWindow(QMainWindow):
         # 播放器区域
         self.player_container = QWidget()
         self.player_container.setMinimumSize(640, 360)
-        self.player_container.setStyleSheet("background: #000;")
+        self.player_container.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #0a0a14, stop:1 #000);
+            border-radius: 4px;
+        """)
         right_layout.addWidget(self.player_container, 1)
 
         # 详情页（默认隐藏，覆盖在播放器上方）
@@ -1457,6 +1506,28 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(8, 8, 8, 8)
+
+        # 欢迎区域
+        self.home_welcome = QFrame()
+        self.home_welcome.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1a1a40, stop:0.5 #1e1e3a, stop:1 #161630);
+                border: 1px solid #2a2a50;
+                border-radius: 12px;
+                padding: 16px;
+            }
+        """)
+        welcome_layout = QVBoxLayout(self.home_welcome)
+        welcome_title = QLabel('📺 TVBox Desktop')
+        welcome_title.setStyleSheet("color: #eee; font-size: 22px; font-weight: bold;")
+        welcome_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome_layout.addWidget(welcome_title)
+        welcome_sub = QLabel('选择左侧标签页开始浏览影视内容')
+        welcome_sub.setStyleSheet("color: #888; font-size: 13px; margin-top: 4px;")
+        welcome_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome_layout.addWidget(welcome_sub)
+        layout.addWidget(self.home_welcome)
 
         self.home_scroll = QScrollArea()
         self.home_scroll.setWidgetResizable(True)
@@ -1503,7 +1574,11 @@ class MainWindow(QMainWindow):
         """创建播放控制栏"""
         bar = QWidget()
         bar.setFixedHeight(60)
-        bar.setStyleSheet("background: #16162a; border-top: 1px solid #333;")
+        bar.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #1a1a32, stop:1 #14142a);
+            border-top: 1px solid #2a2a4a;
+        """)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 4, 12, 4)
         layout.setSpacing(12)
@@ -1598,6 +1673,23 @@ class MainWindow(QMainWindow):
     #  源管理
     # ----------------------------------------------------------
 
+    def _auto_add_presets(self):
+        """首次启动自动添加预设仓库和源"""
+        from core.repository import PRESET_REPOSITORIES
+        for p in PRESET_REPOSITORIES:
+            self.state.repositories.append(
+                Repository(name=p['name'], url=p['url'])
+            )
+        preset_sources = [
+            SourceInfo(name='饭太硬源', url='https://fantaiying.github.io/rrtv/tv/fta.json', repo_name='饭太硬'),
+            SourceInfo(name='OK猫源', url='https://ok321.top/tv/ok.json', repo_name='OK猫'),
+            SourceInfo(name='小米影视源', url='https://raw.githubusercontent.com/xiaomi12345/xiaomitv/main/tv/1.json', repo_name='小米影视'),
+        ]
+        for s in preset_sources:
+            self.state.sources.append(s)
+        self.state.save()
+        self.statusBar().showMessage('🎉 已自动添加预设仓库和源，开始浏览吧！', 8000)
+
     def _refresh_source_dropdown(self):
         """刷新源下拉框"""
         self.source_combo.blockSignals(True)
@@ -1652,9 +1744,11 @@ class MainWindow(QMainWindow):
         if not categories:
             self.home_status.setText('😔 该源没有分类数据')
             self.home_status.show()
+            self.home_welcome.show()
             return
 
         self.home_status.hide()
+        self.home_welcome.hide()
 
         row = 0
         for cat in categories:
@@ -1876,8 +1970,52 @@ class MainWindow(QMainWindow):
             '<h3>TVBox Desktop</h3>'
             '<p>Windows 桌面版 TVBox 播放器</p>'
             '<p>技术栈: Python / PyQt6 / mpv</p>'
-            '<p>版本: 1.0.0</p>'
+            f'<p>版本: {CURRENT_VERSION}</p>'
         )
+
+    def _check_update(self):
+        """检查在线更新"""
+        self.statusBar().showMessage('🔄 正在检查更新...')
+        self._update_worker = WorkerThread(check_update)
+        self._update_worker.finished.connect(self._on_update_checked)
+        self._update_worker.error.connect(lambda e: self.statusBar().showMessage(f'❌ 检查更新失败: {e}'))
+        self._update_worker.start()
+
+    def _on_update_checked(self, info):
+        """更新检查结果"""
+        if not info:
+            QMessageBox.information(self, '检查更新', '无法获取版本信息，请检查网络连接。')
+            self.statusBar().showMessage('就绪')
+            return
+
+        if not info.has_update:
+            QMessageBox.information(self, '检查更新',
+                f'当前已是最新版本 v{CURRENT_VERSION} ✅')
+            self.statusBar().showMessage('已是最新版本', 5000)
+            return
+
+        # 有新版本
+        size_str = format_size(info.file_size) if info.file_size else '未知'
+        msg = (
+            f'<h3>🆕 发现新版本 v{info.version}</h3>'
+            f'<p>当前版本: v{CURRENT_VERSION}</p>'
+            f'<p>发布时间: {info.published_at[:10]}</p>'
+            f'<p>更新大小: {size_str}</p>'
+            f'<hr>'
+            f'<p style="color:#aaa;font-size:12px;">{info.body[:300]}</p>'
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle('发现新版本')
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(msg)
+        box.addButton('前往下载', QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('稍后再说', QMessageBox.ButtonRole.RejectRole)
+        ret = box.exec()
+        if ret == 0:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(info.html_url))
+        self.statusBar().showMessage(f'发现新版本 v{info.version}', 10000)
 
     # ----------------------------------------------------------
     #  收藏 / 历史
