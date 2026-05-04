@@ -34,7 +34,6 @@ from core.media_player import MediaPlayer
 from paste_link_converter import PasteLinkDialog
 from core.updater import check_update, format_size, CURRENT_VERSION
 from core.scraper import MetadataScraper
-from core.builtin_sources import get_all_builtin_sources
 from core.web_video_extractor import WebVideoExtractor
 from core.quark_drive import QuarkDriveClient
 from ui.poster_wall import PosterWallPage
@@ -889,12 +888,12 @@ class SourceDialog(QDialog):
 
     def _add_presets(self):
         """添加内置预设源"""
-        from core.builtin_sources import get_all_builtin_sources
+        from core.builtin_sources import get_builtin_warehouse_sources, get_builtin_single_source_list, get_builtin_live_source_list
         existing = {s.url for s in self.state.sources}
         added = 0
-        for p in get_all_builtin_sources():
-            if p.url not in existing:
-                self.state.sources.append(p)
+        for src in get_builtin_warehouse_sources() + get_builtin_single_source_list() + get_builtin_live_source_list():
+            if src.url not in existing:
+                self.state.sources.append(src)
                 added += 1
         if added:
             self.state.save()
