@@ -18,7 +18,6 @@ from ui.main_window import MainWindow
 
 
 def main():
-    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
     app = QApplication(sys.argv)
 
     # 设置字体
