@@ -642,6 +642,9 @@ class SourceManager:
 
     def _fetch_category_items_api(self, api_url: str, tid: str, pg: int = 1) -> list:
         """通过标准 API 拉取分类下的视频列表"""
+        # 跳过 csp_ 开头的类名
+        if api_url.startswith('csp_'):
+            return []
         items = []
         try:
             url = api_url.rstrip('/') + f'?ac=list&t={tid}&pg={pg}'
@@ -776,6 +779,9 @@ class SourceManager:
 
     def _search_api(self, api_url: str, keyword: str) -> list:
         """通过标准 API 搜索"""
+        # 跳过 csp_ 开头的类名
+        if api_url.startswith('csp_'):
+            return []
         items = []
         try:
             url = api_url.rstrip('/') + f'?ac=detail&wd={keyword}'
