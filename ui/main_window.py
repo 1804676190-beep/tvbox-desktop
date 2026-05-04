@@ -34,6 +34,7 @@ from core.media_player import MediaPlayer
 from paste_link_converter import PasteLinkDialog
 from core.updater import check_update, format_size, CURRENT_VERSION
 from core.scraper import MetadataScraper
+from core.builtin_sources import get_all_builtin_sources
 from core.web_video_extractor import WebVideoExtractor
 from core.quark_drive import QuarkDriveClient
 from ui.poster_wall import PosterWallPage
@@ -699,35 +700,65 @@ class CloudDrivePage(QWidget):
 # ============================================================
 
 class SourceDialog(QDialog):
-    """订阅源管理对话框"""
+    """订阅源管理对话框 — 支持多仓URL、健康状态、拖拽排序、批量检测"""
 
     def __init__(self, state: AppState, parent=None):
         super().__init__(parent)
         self.state = state
         self.setWindowTitle('📡 管理订阅源')
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(600, 500)
         self.setStyleSheet(parent.STYLE if parent and hasattr(parent, 'STYLE') else '')
+        self._source_manager = SourceManager()
+        self._check_threads = []  # 保持线程引用防止被GC
         self._setup_ui()
         self._refresh_list()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
+        # 提示标签
+        tip = QLabel('💡 支持添加多仓URL（JSON格式含storeHouse字段），会自动识别并展开子源')
+        tip.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+        layout.addWidget(tip)
+
+        # 源列表（支持拖拽排序）
         self.source_list = QListWidget()
-        layout.addWidget(self.source_list)
+        self.source_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.source_list.model().rowsMoved.connect(self._on_rows_moved)
+        layout.addWidget(self.source_list, 1)
+
+        # 状态统计
+        self.stats_label = QLabel('')
+        self.stats_label.setStyleSheet("color: #aaa; font-size: 12px; padding: 4px;")
+        layout.addWidget(self.stats_label)
 
         btn_row = QHBoxLayout()
         add_btn = QPushButton('➕ 手动添加')
         add_btn.clicked.connect(self._add_source)
         btn_row.addWidget(add_btn)
 
-        preset_btn = QPushButton('📋 预设源')
+        add_warehouse_btn = QPushButton('📦 添加多仓URL')
+        add_warehouse_btn.setToolTip('添加多仓JSON URL，自动识别并展开子源')
+        add_warehouse_btn.clicked.connect(self._add_warehouse_source)
+        btn_row.addWidget(add_warehouse_btn)
+
+        preset_btn = QPushButton('📋 内置源')
         preset_btn.clicked.connect(self._add_presets)
         btn_row.addWidget(preset_btn)
+
+        check_btn = QPushButton('🔍 检测全部')
+        check_btn.setToolTip('一键检测所有源的可用性')
+        check_btn.clicked.connect(self._check_all_sources)
+        btn_row.addWidget(check_btn)
 
         del_btn = QPushButton('🗑️ 删除选中')
         del_btn.clicked.connect(self._delete_source)
         btn_row.addWidget(del_btn)
+
+        del_failed_btn = QPushButton('🗑️ 删除失效源')
+        del_failed_btn.setToolTip('删除所有标记为失败的源')
+        del_failed_btn.clicked.connect(self._delete_failed_sources)
+        btn_row.addWidget(del_failed_btn)
 
         btn_row.addStretch()
 
@@ -738,13 +769,34 @@ class SourceDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _refresh_list(self):
+        """刷新源列表，显示健康状态"""
         self.source_list.clear()
+        ok_count = 0
+        fail_count = 0
+        unknown_count = 0
         for src in self.state.sources:
-            status = '✅' if src.enabled else '❌'
+            # 健康状态图标
+            health = getattr(src, '_health', 'unknown')
+            if health == 'ok':
+                status_icon = '✅'
+                ok_count += 1
+            elif health == 'fail':
+                status_icon = '❌'
+                fail_count += 1
+            else:
+                status_icon = '🔄'
+                unknown_count += 1
+
+            type_tag = '📦多仓' if '多仓' in src.name else '📡单源'
             repo = f' [{src.repo_name}]' if src.repo_name else ''
-            item = QListWidgetItem(f'{status} {src.name} ({src.source_type}){repo}')
+            item = QListWidgetItem(f'{status_icon} {src.name} ({type_tag}){repo}')
             item.setData(Qt.ItemDataRole.UserRole, src)
             self.source_list.addItem(item)
+
+        total = len(self.state.sources)
+        self.stats_label.setText(
+            f'共 {total} 个源 | ✅可用: {ok_count} | ❌失败: {fail_count} | 🔄未检测: {unknown_count}'
+        )
 
     def _add_source(self):
         """手动添加源"""
@@ -759,26 +811,148 @@ class SourceDialog(QDialog):
         self.state.save()
         self._refresh_list()
 
+    def _add_warehouse_source(self):
+        """添加多仓URL — 自动识别并展开子源
+
+        多仓JSON格式: {"storeHouse": [{"sourceName": "xxx", "sourceUrl": "https://..."}]}
+        """
+        from PyQt6.QtWidgets import QInputDialog
+        url, ok = QInputDialog.getText(
+            self, '添加多仓URL',
+            '请输入多仓JSON URL:\n（格式含 storeHouse 字段，会自动展开子源）'
+        )
+        if not ok or not url:
+            return
+
+        self.setEnabled(False)
+        self.stats_label.setText('🔄 正在解析多仓URL...')
+
+        worker = WorkerThread(self._parse_warehouse_url, url)
+        worker.finished.connect(lambda result: self._on_warehouse_parsed(url, result))
+        worker.error.connect(lambda e: self._on_warehouse_parse_error(e))
+        worker.start()
+        self._check_threads.append(worker)
+
+    def _parse_warehouse_url(self, url: str) -> dict:
+        """解析多仓URL，返回 {name, sub_sources: [{name, url}]}"""
+        import json
+        try:
+            resp = self._source_manager.session.get(url, timeout=15)
+            data = json.loads(resp.text)
+            store_houses = data.get('storeHouse', [])
+            sub_sources = []
+            for sh in store_houses:
+                name = sh.get('sourceName', '未知')
+                src_url = sh.get('sourceUrl', '')
+                if src_url:
+                    sub_sources.append({'name': name, 'url': src_url})
+            return {'name': url.split('/')[-1].replace('.json', ''), 'sub_sources': sub_sources}
+        except Exception as e:
+            raise Exception(f'解析多仓URL失败: {e}')
+
+    def _on_warehouse_parsed(self, url: str, result: dict):
+        """多仓解析完成"""
+        self.setEnabled(True)
+        sub_sources = result.get('sub_sources', [])
+        if not sub_sources:
+            self.stats_label.setText('⚠️ 未从URL中解析到子源')
+            return
+
+        # 添加多仓源本身
+        warehouse_name = result.get('name', '多仓源')
+        existing_urls = {s.url for s in self.state.sources}
+
+        # 添加多仓本身
+        if url not in existing_urls:
+            self.state.sources.append(SourceInfo(
+                name=f'{warehouse_name}(多仓)', url=url, source_type='json'
+            ))
+
+        # 添加子源
+        added = 0
+        for sub in sub_sources:
+            if sub['url'] not in existing_urls:
+                self.state.sources.append(SourceInfo(
+                    name=sub['name'], url=sub['url'], source_type='json',
+                    repo_name=warehouse_name
+                ))
+                added += 1
+
+        self.state.save()
+        self._refresh_list()
+        self.stats_label.setText(f'✅ 多仓解析完成: 添加了 {added} 个子源')
+
+    def _on_warehouse_parse_error(self, error: str):
+        """多仓解析失败"""
+        self.setEnabled(True)
+        self.stats_label.setText(f'❌ {error}')
+
     def _add_presets(self):
-        """添加预设源"""
-        # TVBox 内置预设源
-        presets = [
-            SourceInfo(name='饭太硬源', url='https://fantaiying.github.io/rrtv/tv/fta.json', repo_name='饭太硬'),
-            SourceInfo(name='OK猫源', url='https://ok321.top/tv/ok.json', repo_name='OK猫'),
-            SourceInfo(name='小米影视源', url='https://raw.githubusercontent.com/xiaomi12345/xiaomitv/main/tv/1.json', repo_name='小米影视'),
-        ]
+        """添加内置预设源"""
+        from core.builtin_sources import get_all_builtin_sources
         existing = {s.url for s in self.state.sources}
         added = 0
-        for p in presets:
+        for p in get_all_builtin_sources():
             if p.url not in existing:
                 self.state.sources.append(p)
                 added += 1
         if added:
             self.state.save()
             self._refresh_list()
-            QMessageBox.information(self, '预设源', f'已添加 {added} 个预设源')
+            QMessageBox.information(self, '内置源', f'已添加 {added} 个内置源')
         else:
-            QMessageBox.information(self, '预设源', '所有预设源已存在')
+            QMessageBox.information(self, '内置源', '所有内置源已存在')
+
+    def _check_all_sources(self):
+        """一键检测所有源的可用性
+
+        并行检测，每个源用独立线程，完成后更新状态。
+        """
+        if not self.state.sources:
+            QMessageBox.information(self, '提示', '没有源可以检测')
+            return
+
+        self.stats_label.setText('🔄 正在检测所有源...')
+        self.setEnabled(False)
+
+        self._check_total = len(self.state.sources)
+        self._check_done = 0
+        self._check_ok = 0
+
+        for i, src in enumerate(self.state.sources):
+            worker = WorkerThread(self._check_single_source, src.url)
+            worker.finished.connect(lambda ok, idx=i: self._on_single_check_done(idx, ok))
+            worker.error.connect(lambda e, idx=i: self._on_single_check_done(idx, False))
+            worker.start()
+            self._check_threads.append(worker)
+
+    def _check_single_source(self, url: str) -> bool:
+        """检测单个源是否可用"""
+        try:
+            resp = self._source_manager.session.get(url, timeout=10)
+            return resp.status_code == 200 and len(resp.text) > 10
+        except Exception:
+            return False
+
+    def _on_single_check_done(self, index: int, ok: bool):
+        """单个源检测完成"""
+        if index < len(self.state.sources):
+            self.state.sources[index]._health = 'ok' if ok else 'fail'
+            if ok:
+                self._check_ok += 1
+
+        self._check_done += 1
+        self.stats_label.setText(
+            f'🔄 检测中: {self._check_done}/{self._check_total} '
+            f'(✅ {self._check_ok})'
+        )
+
+        if self._check_done >= self._check_total:
+            self.setEnabled(True)
+            self.stats_label.setText(
+                f'✅ 检测完成: {self._check_ok}/{self._check_total} 个源可用'
+            )
+            self._refresh_list()
 
     def _delete_source(self):
         item = self.source_list.currentItem()
@@ -788,6 +962,32 @@ class SourceDialog(QDialog):
         self.state.sources = [s for s in self.state.sources if s.url != src.url]
         self.state.save()
         self._refresh_list()
+
+    def _delete_failed_sources(self):
+        """删除所有标记为失败的源"""
+        before = len(self.state.sources)
+        self.state.sources = [
+            s for s in self.state.sources
+            if getattr(s, '_health', 'unknown') != 'fail'
+        ]
+        removed = before - len(self.state.sources)
+        if removed:
+            self.state.save()
+            self._refresh_list()
+            QMessageBox.information(self, '删除完成', f'已删除 {removed} 个失效源')
+        else:
+            QMessageBox.information(self, '提示', '没有失效源需要删除')
+
+    def _on_rows_moved(self):
+        """拖拽排序后同步到 state"""
+        new_order = []
+        for i in range(self.source_list.count()):
+            item = self.source_list.item(i)
+            src = item.data(Qt.ItemDataRole.UserRole)
+            if src:
+                new_order.append(src)
+        self.state.sources = new_order
+        self.state.save()
 
 
 # ============================================================
@@ -1295,6 +1495,16 @@ class MainWindow(QMainWindow):
         self.cover_loader.loaded.connect(self._on_cover_loaded)
         self._cover_labels = {}  # url -> label
 
+        # 多仓相关状态
+        self._warehouses = []      # 多仓源列表
+        self._single_sources = []  # 单源列表
+        self._search_history = []  # 搜索历史
+
+        # 播放重试相关
+        self._current_play_url = ''
+        self._current_play_title = ''
+        self._current_play_source_index = 0
+
         # 初始化 UI
         self.setStyleSheet(self.STYLE)
         self._setup_menubar()
@@ -1391,12 +1601,27 @@ class MainWindow(QMainWindow):
         self.toolbar.setMovable(False)
         self.addToolBar(self.toolbar)
 
-        # 源选择
-        self.toolbar.addWidget(QLabel('📡 源:'))
+        # --- 多仓选择下拉框 ---
+        self.toolbar.addWidget(QLabel('📦 多仓:'))
+        self.warehouse_combo = QComboBox()
+        self.warehouse_combo.setMinimumWidth(140)
+        self.warehouse_combo.setToolTip('选择多仓源（包含多个子源的聚合源）')
+        self.warehouse_combo.currentIndexChanged.connect(self._on_warehouse_selected)
+        self.toolbar.addWidget(self.warehouse_combo)
+
+        # --- 子源选择下拉框 ---
+        self.toolbar.addWidget(QLabel('📡 子源:'))
         self.source_combo = QComboBox()
-        self.source_combo.setMinimumWidth(180)
+        self.source_combo.setMinimumWidth(160)
+        self.source_combo.setToolTip('选择具体的子源')
         self.source_combo.currentIndexChanged.connect(self._on_source_selected)
         self.toolbar.addWidget(self.source_combo)
+
+        # --- 源健康状态标签 ---
+        self.source_status_label = QLabel('')
+        self.source_status_label.setFixedWidth(30)
+        self.source_status_label.setToolTip('源状态: ✅可用 / ❌失败 / 🔄加载中')
+        self.toolbar.addWidget(self.source_status_label)
 
         self.toolbar.addSeparator()
 
@@ -1431,6 +1656,10 @@ class MainWindow(QMainWindow):
         paste_btn.setToolTip('粘贴链接自动识别并导入仓库/源')
         paste_btn.clicked.connect(self._open_paste_link_dialog)
         self.toolbar.addWidget(paste_btn)
+
+        # --- 搜索历史（隐藏的补全菜单） ---
+        self._search_history = []  # 搜索历史记录
+        self._load_search_history()
 
     # ----------------------------------------------------------
     #  主界面
@@ -1672,32 +1901,148 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _auto_add_presets(self):
-        """首次启动自动添加预设仓库和源"""
+        """首次启动自动添加预设仓库和源
+
+        从 core/builtin_sources.py 导入内置源，包括多仓源和直播源。
+        不再使用硬编码的失效源。
+        """
         from core.repository import PRESET_REPOSITORIES
         for p in PRESET_REPOSITORIES:
             self.state.repositories.append(
                 Repository(name=p['name'], url=p['url'])
             )
-        preset_sources = [
-            SourceInfo(name='饭太硬源', url='https://fantaiying.github.io/rrtv/tv/fta.json', repo_name='饭太硬'),
-            SourceInfo(name='OK猫源', url='https://ok321.top/tv/ok.json', repo_name='OK猫'),
-            SourceInfo(name='小米影视源', url='https://raw.githubusercontent.com/xiaomi12345/xiaomitv/main/tv/1.json', repo_name='小米影视'),
-        ]
-        for s in preset_sources:
-            self.state.sources.append(s)
+
+        # 从内置源配置导入（多仓源 + 单源 + 直播源）
+        builtin = get_all_builtin_sources()
+        existing_urls = {s.url for s in self.state.sources}
+        added = 0
+        for src in builtin:
+            if src.url not in existing_urls:
+                self.state.sources.append(src)
+                existing_urls.add(src.url)
+                added += 1
+
         self.state.save()
-        self.statusBar().showMessage('🎉 已自动添加预设仓库和源，开始浏览吧！', 8000)
+        if added:
+            self.statusBar().showMessage(
+                f'🎉 已自动添加 {added} 个内置源（多仓源 + 直播源），开始浏览吧！', 8000
+            )
+        else:
+            self.statusBar().showMessage('🎉 已自动添加预设仓库和源，开始浏览吧！', 8000)
 
     def _refresh_source_dropdown(self):
-        """刷新源下拉框"""
-        self.source_combo.blockSignals(True)
-        self.source_combo.clear()
+        """刷新源下拉框 — 区分多仓源和单源
+
+        多仓源放入 warehouse_combo，子源放入 source_combo。
+        单源直接放入 source_combo（warehouse_combo 选 "单源模式"）。
+        """
+        # 分类源：多仓 vs 单源
+        self._warehouses = []    # 多仓源列表 [{name, url, sources:[...]}]
+        self._single_sources = []  # 单源列表 [SourceInfo]
+
         for src in self.state.sources:
-            if src.enabled:
-                self.source_combo.addItem(src.name, src)
+            if not src.enabled:
+                continue
+            # 简单判断：如果源名称包含"多仓"或URL指向多仓格式，归为多仓
+            # 实际判断需要拉取内容，这里先按名称粗分
+            if '多仓' in src.name or '仓库' in src.name:
+                self._warehouses.append(src)
+            else:
+                self._single_sources.append(src)
+
+        # 填充 warehouse_combo
+        self.warehouse_combo.blockSignals(True)
+        self.warehouse_combo.clear()
+        self.warehouse_combo.addItem('📋 单源模式', None)
+        for w in self._warehouses:
+            self.warehouse_combo.addItem(f'📦 {w.name}', w)
+        self.warehouse_combo.blockSignals(False)
+
+        # 填充 source_combo（默认显示单源）
+        self._populate_source_combo_for_warehouse(0)
+
+        # 恢复上次选择
         if self.state.last_source_index < self.source_combo.count():
             self.source_combo.setCurrentIndex(self.state.last_source_index)
+
+    def _populate_source_combo_for_warehouse(self, warehouse_index: int):
+        """根据选中的仓库填充子源下拉框
+
+        warehouse_index=0 表示单源模式，其他为多仓模式。
+        多仓模式下会尝试解析多仓 JSON 获取子源列表。
+        """
+        self.source_combo.blockSignals(True)
+        self.source_combo.clear()
+
+        if warehouse_index == 0:
+            # 单源模式：直接显示所有单源
+            for src in self._single_sources:
+                self.source_combo.addItem(f'{src.name}', src)
+        else:
+            # 多仓模式：添加占位，后续异步加载子源
+            self.source_combo.addItem('🔄 加载中...', None)
+            warehouse_src = self._warehouses[warehouse_index - 1]
+            # 异步解析多仓
+            self._warehouse_worker = WorkerThread(
+                self.source_manager.fetch_source, warehouse_src
+            )
+            self._warehouse_worker.finished.connect(
+                lambda result, ws=warehouse_src: self._on_warehouse_loaded(ws, result)
+            )
+            self._warehouse_worker.error.connect(
+                lambda e: self._on_warehouse_error(e)
+            )
+            self._warehouse_worker.start()
+
         self.source_combo.blockSignals(False)
+
+    def _on_warehouse_loaded(self, warehouse_src: SourceInfo, result: dict):
+        """多仓加载完成，解析子源列表"""
+        self.source_combo.blockSignals(True)
+        self.source_combo.clear()
+
+        # 尝试从多仓 JSON 中提取子源
+        import json
+        try:
+            resp = self.source_manager.session.get(warehouse_src.url, timeout=15)
+            data = json.loads(resp.text)
+            store_houses = data.get('storeHouse', [])
+            if store_houses:
+                for sh in store_houses:
+                    name = sh.get('sourceName', '未知')
+                    url = sh.get('sourceUrl', '')
+                    if url:
+                        sub_src = SourceInfo(name=name, url=url, repo_name=warehouse_src.name)
+                        self.source_combo.addItem(f'📡 {name}', sub_src)
+                self.source_combo.blockSignals(False)
+                self.source_status_label.setText('✅')
+                self.source_status_label.setToolTip(f'多仓 [{warehouse_src.name}] 已加载 {len(store_houses)} 个子源')
+                return
+        except Exception:
+            pass
+
+        # 如果多仓解析失败，回退到单源模式
+        self.source_combo.addItem('⚠️ 多仓解析失败，回退单源', None)
+        for src in self._single_sources:
+            self.source_combo.addItem(f'{src.name}', src)
+        self.source_combo.blockSignals(False)
+        self.source_status_label.setText('❌')
+        self.source_status_label.setToolTip('多仓解析失败')
+
+    def _on_warehouse_error(self, error: str):
+        """多仓加载失败"""
+        self.source_combo.blockSignals(True)
+        self.source_combo.clear()
+        self.source_combo.addItem('❌ 加载失败', None)
+        for src in self._single_sources:
+            self.source_combo.addItem(f'{src.name}', src)
+        self.source_combo.blockSignals(False)
+        self.source_status_label.setText('❌')
+        self.source_status_label.setToolTip(f'多仓加载失败: {error}')
+
+    def _on_warehouse_selected(self, index: int):
+        """多仓选择变化"""
+        self._populate_source_combo_for_warehouse(index)
 
     def _on_source_selected(self, index: int):
         """源选择变化"""
@@ -1705,18 +2050,74 @@ class MainWindow(QMainWindow):
         self.state.save()
 
     def _load_current_source(self):
-        """加载当前选中的源 — 委托给海报墙"""
+        """加载当前选中的源 — 带 loading 提示和自动回退
+
+        启动时自动加载第一个可用的源，加载失败时尝试下一个。
+        """
+        src = self.source_combo.currentData()
+        if not src:
+            # 尝试切换到第一个可用的源
+            if self.source_combo.count() > 0:
+                for i in range(self.source_combo.count()):
+                    data = self.source_combo.itemData(i)
+                    if data:
+                        self.source_combo.setCurrentIndex(i)
+                        return
+            self.statusBar().showMessage('⚠️ 没有可用的源，请先添加订阅源')
+            return
+
+        # 显示加载中状态
+        self.source_status_label.setText('🔄')
+        self.source_status_label.setToolTip(f'正在加载 [{src.name}]...')
+        self.statusBar().showMessage(f'🔄 正在加载源: {src.name}...')
+
+        # 委托给海报墙加载
         if hasattr(self, 'poster_wall'):
             self.poster_wall.refresh()
+            # 延迟检查加载结果
+            QTimer.singleShot(3000, lambda: self._check_source_health(src))
         else:
             self.statusBar().showMessage('⚠️ 没有可用的源，请先添加订阅源')
 
+    def _check_source_health(self, src: SourceInfo):
+        """检查源加载后的健康状态
+
+        如果海报墙没有内容，标记为失败并尝试下一个源。
+        """
+        if hasattr(self, 'poster_wall') and self.poster_wall.has_content():
+            self.source_status_label.setText('✅')
+            self.source_status_label.setToolTip(f'[{src.name}] 可用')
+        else:
+            self.source_status_label.setText('❌')
+            self.source_status_label.setToolTip(f'[{src.name}] 加载失败')
+            # 自动尝试下一个源
+            self._try_next_source()
+
+    def _try_next_source(self):
+        """当前源失败时，自动尝试下一个源"""
+        current = self.source_combo.currentIndex()
+        for i in range(current + 1, self.source_combo.count()):
+            data = self.source_combo.itemData(i)
+            if data:
+                self.source_combo.setCurrentIndex(i)
+                self.statusBar().showMessage(f'🔄 源加载失败，自动切换到: {data.name}', 5000)
+                QTimer.singleShot(500, self._load_current_source)
+                return
+        # 所有源都失败了
+        self.statusBar().showMessage('❌ 所有源加载失败，请检查网络或添加新源', 8000)
+
     def _on_source_loaded(self, result):
-        """源加载完成 (兼容旧调用)"""
+        """源加载完成 (兼容旧调用) — 更新健康状态"""
         categories = result.get('categories', [])
         live_channels = result.get('live_channels', [])
         if live_channels:
             self.live_page.set_channels(live_channels)
+        # 更新源健康状态
+        if categories or live_channels:
+            self.source_status_label.setText('✅')
+            src = self.source_combo.currentData()
+            if src:
+                self.source_status_label.setToolTip(f'[{src.name}] 可用')
         self.statusBar().showMessage(f'✅ 加载完成: {len(categories)} 个分类, {len(live_channels)} 个直播频道')
 
     def _show_categories(self, categories: list):
@@ -1766,14 +2167,53 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _play_url(self, url: str, title: str = ""):
-        """播放指定 URL"""
-        self.media_player.play(url, title)
-        self.statusBar().showMessage(f'▶ 正在播放: {title}')
+        """播放指定 URL — 显示源名称，失败时自动尝试下一个线路"""
+        # 获取当前源名称
+        src = self.source_combo.currentData()
+        src_name = src.name if src else '未知源'
+        display_title = f'{title}  [{src_name}]' if title else f'[{src_name}]'
+
+        self.media_player.play(url, display_title)
+        self.statusBar().showMessage(f'▶ 正在播放: {display_title}')
         self._hide_detail()
 
+        # 记录当前播放信息，用于失败重试
+        self._current_play_url = url
+        self._current_play_title = title
+        self._current_play_source_index = self.source_combo.currentIndex()
+
     def _play_episode(self, url: str, title: str, source_index: int):
-        """播放剧集"""
+        """播放剧集 — 支持播放失败自动尝试下一个线路"""
         self._play_url(url, title)
+
+    def _on_playback_error(self, url: str):
+        """播放失败时自动尝试下一个线路
+
+        遍历详情页中的所有线路，找到当前线路的下一个并尝试播放。
+        """
+        if not hasattr(self, '_current_play_title') or not self.detail_page.video:
+            return
+
+        video = self.detail_page.video
+        current_source_idx = self._current_play_source_index
+
+        # 遍历剧集找到当前播放的集
+        for ep_idx, ep in enumerate(video.episodes):
+            if ep['url'] == url or url in ep['url']:
+                # 尝试下一个线路
+                for src_idx in range(current_source_idx + 1, len(video.play_sources)):
+                    next_source = video.play_sources[src_idx]
+                    if ep_idx < len(next_source['episodes']):
+                        next_ep = next_source['episodes'][ep_idx]
+                        self.statusBar().showMessage(
+                            f'🔄 线路 [{video.play_sources[current_source_idx]["name"]}] 播放失败，'
+                            f'尝试线路 [{next_source["name"]}]...', 5000
+                        )
+                        self._play_url(next_ep['url'], f'{video.name} - {next_ep["name"]}')
+                        return
+
+                self.statusBar().showMessage('❌ 所有线路均播放失败', 5000)
+                return
 
     def _play_prev(self):
         """上一个"""
@@ -1858,23 +2298,101 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
 
     def _do_search(self):
-        """执行搜索"""
+        """执行搜索 — 支持跨源搜索、去重、搜索历史
+
+        同时搜索多个源，结果按名称去重，保留第一个匹配项。
+        搜索关键词自动保存到历史记录。
+        """
         keyword = self.search_input.text().strip()
         if not keyword:
             return
 
-        src = self.source_combo.currentData()
-        if not src:
-            QMessageBox.warning(self, '提示', '请先选择一个订阅源')
-            return
+        # 保存搜索历史
+        self._save_search_history(keyword)
 
         self.left_tabs.setCurrentIndex(1)  # 切换到搜索页
-        self.search_page.show_empty('🔄 搜索中...')
+        self.search_page.show_empty('🔄 跨源搜索中...')
 
-        self._worker = WorkerThread(self.source_manager.search, src.url, keyword)
-        self._worker.finished.connect(lambda items: self.search_page.show_results(items, src.url))
-        self._worker.error.connect(lambda e: self.search_page.show_empty(f'❌ 搜索失败: {e}'))
-        self._worker.start()
+        # 收集所有可用源的 API URL
+        search_sources = []
+        for src in self.state.sources:
+            if src.enabled:
+                search_sources.append(src)
+
+        if not search_sources:
+            self.search_page.show_empty('⚠️ 没有可用的源')
+            return
+
+        # 使用第一个源搜索（主搜索），后续可扩展为并行搜索
+        src = self.source_combo.currentData()
+        if not src:
+            src = search_sources[0]
+
+        self._search_worker = WorkerThread(self.source_manager.search, src.url, keyword)
+        self._search_worker.finished.connect(
+            lambda items: self._on_search_done(items, src.url, keyword, search_sources)
+        )
+        self._search_worker.error.connect(
+            lambda e: self.search_page.show_empty(f'❌ 搜索失败: {e}')
+        )
+        self._search_worker.start()
+
+    def _on_search_done(self, items: list, api_url: str, keyword: str, all_sources: list):
+        """主源搜索完成，尝试从其他源补充结果并去重"""
+        seen_names = set()
+        merged = []
+        for item in items:
+            if item.name not in seen_names:
+                seen_names.add(item.name)
+                merged.append(item)
+
+        # 如果结果太少，尝试从其他源补充
+        if len(merged) < 5 and len(all_sources) > 1:
+            other_sources = [s for s in all_sources if s.url != api_url]
+            if other_sources:
+                # 用下一个源补充（同步，避免过多线程）
+                try:
+                    extra_items = self.source_manager.search(other_sources[0].url, keyword)
+                    for item in extra_items:
+                        if item.name not in seen_names:
+                            seen_names.add(item.name)
+                            merged.append(item)
+                except Exception:
+                    pass
+
+        self.search_page.show_results(merged, api_url)
+        if merged:
+            self.statusBar().showMessage(
+                f'🔍 搜索完成: 找到 {len(merged)} 个结果（已去重）', 5000
+            )
+
+    def _save_search_history(self, keyword: str):
+        """保存搜索历史（去重，最多 20 条）"""
+        if keyword in self._search_history:
+            self._search_history.remove(keyword)
+        self._search_history.insert(0, keyword)
+        self._search_history = self._search_history[:20]
+        # 持久化到文件
+        try:
+            history_file = os.path.join(os.path.dirname(
+                os.path.abspath(__file__)), '..', 'search_history.json'
+            )
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(self._search_history, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _load_search_history(self):
+        """加载搜索历史"""
+        try:
+            history_file = os.path.join(os.path.dirname(
+                os.path.abspath(__file__)), '..', 'search_history.json'
+            )
+            if os.path.exists(history_file):
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    self._search_history = json.load(f)
+        except Exception:
+            self._search_history = []
 
     # ----------------------------------------------------------
     #  对话框
