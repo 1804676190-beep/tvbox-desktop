@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows Installer
 
 on:
   push:
@@ -47,16 +47,20 @@ jobs:
         shell: pwsh
         continue-on-error: true
 
-      - name: Create ZIP
-        run: |
-          Compress-Archive -Path "dist\TVBox Desktop\*" -DestinationPath "TVBox-Desktop-win64.zip" -Force
-        shell: pwsh
+      - name: Build Installer (Inno Setup)
+        uses: jrmypfrd/setup-innosetup@v1
+        with:
+          version: '6.2.2'
 
-      - name: Upload artifact
+      - name: Compile Installer
+        run: iscc installer.iss /Q
+        shell: cmd
+
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TVBox-Desktop-win64
-          path: TVBox-Desktop-win64.zip
+          name: TVBox-Desktop-Setup
+          path: installer_output/TVBox-Desktop-*-Setup.exe
           retention-days: 30
 
   release:
@@ -67,10 +71,10 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: TVBox-Desktop-win64
+          name: TVBox-Desktop-Setup
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: TVBox-Desktop-win64.zip
+          files: TVBox-Desktop-*-Setup.exe
           generate_release_notes: true

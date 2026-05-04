@@ -8,7 +8,7 @@ from dataclasses import dataclass
 # GitHub 仓库信息
 GITHUB_OWNER = "1804676190-beep"
 GITHUB_REPO = "tvbox-desktop"
-CURRENT_VERSION = "1.0.0"
+CURRENT_VERSION = "1.2.0"
 
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"

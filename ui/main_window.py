@@ -33,6 +33,11 @@ from core.cloud_drive import AlistClient, WebDAVClient, CloudFile
 from core.media_player import MediaPlayer
 from paste_link_converter import PasteLinkDialog
 from core.updater import check_update, format_size, CURRENT_VERSION
+from core.scraper import MetadataScraper
+from core.web_video_extractor import WebVideoExtractor
+from core.quark_drive import QuarkDriveClient
+from ui.poster_wall import PosterWallPage
+from ui.quark_login_dialog import QuarkLoginDialog
 
 
 # ============================================================
@@ -1354,6 +1359,13 @@ class MainWindow(QMainWindow):
         update_action.triggered.connect(self._check_update)
         help_menu.addAction(update_action)
 
+        # --- 网盘菜单 ---
+        drive_menu = self.menuBar().addMenu("☁️ 网盘")
+        quark_action = QAction("☁️ 添加夸克网盘", self)
+        quark_action.setShortcut("Ctrl+Shift+Q")
+        quark_action.triggered.connect(self._add_quark_drive)
+        drive_menu.addAction(quark_action)
+
         help_menu.addSeparator()
 
         about_action = QAction('关于', self)
@@ -1502,48 +1514,19 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.splitter)
 
     def _create_home_page(self) -> QWidget:
-        """创建首页"""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
-
-        # 欢迎区域
-        self.home_welcome = QFrame()
-        self.home_welcome.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #1a1a40, stop:0.5 #1e1e3a, stop:1 #161630);
-                border: 1px solid #2a2a50;
-                border-radius: 12px;
-                padding: 16px;
-            }
-        """)
-        welcome_layout = QVBoxLayout(self.home_welcome)
-        welcome_title = QLabel('📺 TVBox Desktop')
-        welcome_title.setStyleSheet("color: #eee; font-size: 22px; font-weight: bold;")
-        welcome_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        welcome_layout.addWidget(welcome_title)
-        welcome_sub = QLabel('选择左侧标签页开始浏览影视内容')
-        welcome_sub.setStyleSheet("color: #888; font-size: 13px; margin-top: 4px;")
-        welcome_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        welcome_layout.addWidget(welcome_sub)
-        layout.addWidget(self.home_welcome)
-
-        self.home_scroll = QScrollArea()
-        self.home_scroll.setWidgetResizable(True)
-        self.home_content = QWidget()
-        self.home_grid = QGridLayout(self.home_content)
-        self.home_grid.setSpacing(12)
-        self.home_scroll.setWidget(self.home_content)
-        self.home_scroll.setStyleSheet("QScrollArea { border: none; }")
-        layout.addWidget(self.home_scroll, 1)
-
-        self.home_status = QLabel('选择一个源开始浏览')
-        self.home_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.home_status.setStyleSheet("color: #555; font-size: 14px;")
-        layout.addWidget(self.home_status)
-
-        return page
+        """创建首页 — 海报墙模式"""
+        self.scraper = MetadataScraper(tmdb_api_key="")  # 可选填入 TMDB API Key
+        self.poster_wall = PosterWallPage(
+            state=self.state,
+            source_mgr=self.source_manager,
+            scraper=self.scraper,
+            cover_loader=self.cover_loader,
+        )
+        self.poster_wall.video_clicked.connect(self._load_detail)
+        self.poster_wall.status_message.connect(self.statusBar().showMessage)
+        # 启动时自动刷新
+        QTimer.singleShot(800, self.poster_wall.refresh)
+        return self.poster_wall
 
     def _create_list_page(self, list_type: str) -> QWidget:
         """创建收藏/历史页"""
@@ -2056,6 +2039,108 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------
     #  全局快捷键
     # ----------------------------------------------------------
+
+    # ----------------------------------------------------------
+    #  网页视频提取
+    # ----------------------------------------------------------
+
+    def _on_paste_link_smart(self):
+        """智能粘贴链接 — 自动识别类型"""
+        clipboard = QApplication.clipboard().text().strip()
+        if not clipboard.startswith("http"):
+            return
+        lower = clipboard.lower()
+        # TVBox JSON 源
+        if any(k in lower for k in ['.json', 'tvbox', 'box.json']):
+            self._open_paste_link_dialog()
+            return
+        # 网页视频提取
+        self.statusBar().showMessage("🔍 正在分析网页视频资源...")
+        self._web_extract_worker = WorkerThread(self._extract_web_video, clipboard)
+        self._web_extract_worker.finished.connect(self._on_web_video_extracted)
+        self._web_extract_worker.error.connect(
+            lambda e: self.statusBar().showMessage(f"❌ 网页分析失败: {e}")
+        )
+        self._web_extract_worker.start()
+
+    def _extract_web_video(self, url: str):
+        extractor = WebVideoExtractor()
+        sources = extractor.extract(url)
+        return {"url": url, "sources": sources,
+                "tvbox_source": extractor.extract_to_tvbox_source(url) if sources else None}
+
+    def _on_web_video_extracted(self, result: dict):
+        sources = result.get("sources", [])
+        tvbox_source = result.get("tvbox_source")
+        if not sources:
+            self.statusBar().showMessage("⚠️ 未检测到视频资源")
+            return
+        detail_lines = [f"  • [{s.quality}] {s.source_type} — {s.url[:80]}" for s in sources[:10]]
+        msg = QMessageBox(self)
+        msg.setWindowTitle("🔗 检测到视频资源")
+        msg.setText(f"从网页中检测到 {len(sources)} 个视频源:")
+        msg.setInformativeText("\n".join(detail_lines))
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.button(QMessageBox.StandardButton.Yes).setText("导入")
+        msg.button(QMessageBox.StandardButton.No).setText("取消")
+        if msg.exec() == QMessageBox.StandardButton.Yes and tvbox_source:
+            source = SourceInfo(name=tvbox_source["name"], url=result["url"], source_type="json")
+            self.state.sources.append(source)
+            self.state.save()
+            self.statusBar().showMessage(f"✅ 已导入网页视频源: {tvbox_source['name']}")
+            if hasattr(self, 'poster_wall'):
+                self.poster_wall.refresh()
+
+    # ----------------------------------------------------------
+    #  夸克网盘
+    # ----------------------------------------------------------
+
+    def _add_quark_drive(self):
+        """添加夸克网盘 (扫码登录)"""
+        client = QuarkDriveClient()
+        if not client.is_logged_in():
+            dialog = QuarkLoginDialog(client, self)
+            if not dialog.exec():
+                return
+        config = CloudDriveConfig(name="夸克网盘", drive_type="quark", enabled=True)
+        self.state.cloud_drives.append(config)
+        self.state.save()
+        quota = client.get_quota()
+        if quota:
+            self.statusBar().showMessage(
+                f"✅ 夸克网盘已连接 — 已用 {quota.get('used_str', '?')} / 共 {quota.get('total_str', '?')}")
+        else:
+            self.statusBar().showMessage("✅ 夸克网盘已授权成功")
+        self._browse_quark_files(client)
+
+    def _browse_quark_files(self, client: QuarkDriveClient, fid: str = "0"):
+        files = client.list_dir(fid)
+        if not files:
+            QMessageBox.information(self, "夸克网盘", "文件夹为空或加载失败")
+            return
+        items = []
+        for f in files:
+            icon = "📁" if f.is_dir else ("🎬" if f.is_video else "📄")
+            size = f.size_str if not f.is_dir else ""
+            items.append(f"{icon} {f.name}  {size}")
+        from PyQt6.QtWidgets import QInputDialog as _QID
+        item, ok = _QID.getItem(self, "夸克网盘 — 选择文件", "文件列表:", items, 0, False)
+        if ok and item:
+            idx = items.index(item)
+            selected = files[idx]
+            if selected.is_dir:
+                self._browse_quark_files(client, selected.file_id)
+            elif selected.is_video:
+                play_url = client.get_video_play_url(selected.file_id)
+                if play_url:
+                    self.media_player.play_url(play_url)
+                    self.statusBar().showMessage(f"▶️ 正在播放: {selected.name}")
+                else:
+                    QMessageBox.warning(self, "播放失败", "无法获取视频播放链接")
+
+    def _on_paste_link(self):
+        """粘贴链接 — 智能识别"""
+        self._on_paste_link_smart()
 
     def keyPressEvent(self, event):
         # Ctrl+Shift+V: 粘贴链接导入
